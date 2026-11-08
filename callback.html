@@ -1,9 +1,16 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connected</title><link rel="stylesheet" href="style.css"></head><body>
-<h1>TikTok account connected</h1>
-<p id="msg">Copy the authorization code below and paste it into the uploader.</p>
-<pre id="code" style="background:#f4f4f4;padding:12px;white-space:pre-wrap;word-break:break-all"></pre>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connecting…</title><link rel="stylesheet" href="style.css"><script src="config.js"></script></head><body>
+<h1>Connecting your TikTok account…</h1><p id="msg">Please wait.</p>
 <script>
-var p=new URLSearchParams(location.search);
-document.getElementById('code').textContent=p.get('code')||('Error: '+(p.get('error_description')||p.get('error')||'no code'));
-</script>
-<footer><a href="index.html">Samguk Shorts Uploader</a></footer></body></html>
+(async () => {
+  const p = new URLSearchParams(location.search), msg = document.getElementById('msg');
+  if (!p.get('code')) { msg.textContent = 'Sign-in was cancelled: ' + (p.get('error_description') || p.get('error') || 'no code'); return; }
+  if (p.get('state') !== sessionStorage.getItem('tt_state')) { msg.textContent = 'State mismatch. Please try again.'; return; }
+  try {
+    const r = await fetch(SAMGUK.api + '/api/token', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ code: p.get('code') }) });
+    const t = await r.json();
+    if (!t.access_token) throw new Error(t.error_description || t.error || 'token error');
+    sessionStorage.setItem('tt_token', JSON.stringify(t));
+    location.replace('uploader.html');
+  } catch (e) { msg.textContent = 'Could not connect: ' + e.message; }
+})();
+</script></body></html>

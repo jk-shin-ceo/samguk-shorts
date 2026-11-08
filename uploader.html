@@ -1,0 +1,186 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Samguk Shorts Uploader</title><link rel="stylesheet" href="style.css"><script src="config.js"></script>
+<style>
+.card{border:1px solid #ddd;border-radius:10px;padding:16px;margin:16px 0}
+.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.avatar{width:48px;height:48px;border-radius:50%}
+label{display:block;margin:8px 0}
+input[type=text],textarea,select{width:100%;padding:8px;font-size:15px;box-sizing:border-box}
+button{background:#8b1a1a;color:#fff;border:0;border-radius:6px;padding:10px 16px;font-size:15px;cursor:pointer}
+button.alt{background:#555}button:disabled{background:#bbb;cursor:not-allowed}
+.muted{color:#666;font-size:14px}.err{color:#b00}.ok{color:#070}
+video{max-width:240px;max-height:420px;background:#000;border-radius:8px}
+table{border-collapse:collapse;width:100%;font-size:14px}td,th{border-bottom:1px solid #eee;padding:6px;text-align:left}
+</style></head><body>
+<nav><a href="index.html">Home</a><a href="uploader.html">Uploader</a><a href="terms.html">Terms</a><a href="privacy.html">Privacy</a></nav>
+<h1>Samguk Shorts Uploader</h1>
+
+<div id="login" class="card">
+  <p>Connect your TikTok account to post videos and see their stats.</p>
+  <button id="btnLogin">Continue with TikTok</button>
+</div>
+
+<div id="app" style="display:none">
+  <div class="card row" id="creator"></div>
+
+  <div class="card">
+    <h2>Post a video</h2>
+    <label>Video file (MP4)<input type="file" id="file" accept="video/mp4,video/quicktime"></label>
+    <video id="preview" controls style="display:none"></video>
+    <p class="muted" id="dur"></p>
+    <label>Caption<textarea id="title" rows="4" maxlength="2200" placeholder="Title, description and #hashtags"></textarea></label>
+
+    <label>Who can view this video
+      <select id="privacy"><option value="" selected disabled>Select privacy level</option></select></label>
+
+    <p><b>Allow users to</b></p>
+    <div class="row">
+      <label><input type="checkbox" id="allowComment"> Comment</label>
+      <label><input type="checkbox" id="allowDuet"> Duet</label>
+      <label><input type="checkbox" id="allowStitch"> Stitch</label>
+    </div>
+
+    <label><input type="checkbox" id="aigc"> This video is AI-generated content</label>
+
+    <div class="card">
+      <label><input type="checkbox" id="disclose"> <b>Disclose video content</b></label>
+      <p class="muted">Turn on to disclose that this video promotes goods or services in exchange for something of value.</p>
+      <div id="discloseOpts" style="display:none">
+        <label><input type="checkbox" id="yourBrand"> Your brand <span class="muted">— You are promoting yourself or your own business. Your video will be labeled "Promotional content".</span></label>
+        <label><input type="checkbox" id="branded"> Branded content <span class="muted">— You are promoting another brand or a third party. Your video will be labeled "Paid partnership".</span></label>
+        <p class="muted" id="discloseHint"></p>
+      </div>
+    </div>
+
+    <p class="muted" id="consent"></p>
+    <div class="row">
+      <button id="btnPost" disabled>Post to TikTok</button>
+      <button id="btnDraft" class="alt" disabled>Send to TikTok inbox as draft</button>
+    </div>
+    <p id="status"></p>
+  </div>
+
+  <div class="card">
+    <h2>Stats</h2>
+    <div id="stats" class="muted">Loading…</div>
+    <table id="videos"></table>
+    <p><button class="alt" id="btnRefresh">Refresh stats</button></p>
+  </div>
+  <p><a href="#" id="logout">Disconnect</a></p>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let token = null, creator = null, videoDuration = 0;
+
+$('btnLogin').onclick = () => {
+  const state = crypto.randomUUID();
+  sessionStorage.setItem('tt_state', state);
+  const q = new URLSearchParams({ client_key: SAMGUK.clientKey, scope: SAMGUK.scopes, response_type: 'code', redirect_uri: SAMGUK.redirectUri, state });
+  location.href = 'https://www.tiktok.com/v2/auth/authorize/?' + q;
+};
+$('logout').onclick = e => { e.preventDefault(); sessionStorage.removeItem('tt_token'); location.reload(); };
+
+async function call(path, body, query) {
+  const r = await fetch(SAMGUK.api + '/api/proxy', { method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token.access_token },
+    body: JSON.stringify({ path, body, query }) });
+  const j = await r.json();
+  if (j.error && j.error.code && j.error.code !== 'ok') throw new Error(j.error.message || j.error.code);
+  return j.data;
+}
+
+async function loadCreator() {
+  creator = await call('/v2/post/publish/creator_info/query/', {});
+  $('creator').innerHTML = `<img class="avatar" src="${creator.creator_avatar_url}" alt=""><div><b>${creator.creator_nickname}</b><br><span class="muted">@${creator.creator_username} · videos up to ${creator.max_video_post_duration_sec}s</span></div>`;
+  const sel = $('privacy');
+  const names = { PUBLIC_TO_EVERYONE: 'Everyone', MUTUAL_FOLLOW_FRIENDS: 'Friends', FOLLOWER_OF_CREATOR: 'Followers', SELF_ONLY: 'Only me' };
+  for (const v of creator.privacy_level_options) { const o = document.createElement('option'); o.value = v; o.textContent = names[v] || v; sel.appendChild(o); }
+  if (creator.comment_disabled) { $('allowComment').disabled = true; $('allowComment').parentElement.classList.add('muted'); }
+  if (creator.duet_disabled) { $('allowDuet').disabled = true; $('allowDuet').parentElement.classList.add('muted'); }
+  if (creator.stitch_disabled) { $('allowStitch').disabled = true; $('allowStitch').parentElement.classList.add('muted'); }
+}
+
+async function loadStats() {
+  try {
+    const u = await call('/v2/user/info/', null, 'fields=display_name,follower_count,following_count,likes_count,video_count');
+    const s = u.user;
+    $('stats').innerHTML = `<b>${s.follower_count}</b> followers · <b>${s.likes_count}</b> likes · <b>${s.video_count}</b> videos`;
+    const v = await call('/v2/video/list/', { max_count: 20 }, 'fields=id,title,create_time,view_count,like_count,comment_count,share_count');
+    const rows = (v.videos || []).map(x => `<tr><td>${new Date(x.create_time*1000).toLocaleDateString()}</td><td>${(x.title||'').slice(0,40)}</td><td>${x.view_count}</td><td>${x.like_count}</td><td>${x.comment_count}</td><td>${x.share_count}</td></tr>`).join('');
+    $('videos').innerHTML = '<tr><th>Date</th><th>Video</th><th>Views</th><th>Likes</th><th>Comments</th><th>Shares</th></tr>' + (rows || '<tr><td colspan=6 class="muted">No videos yet</td></tr>');
+  } catch (e) { $('stats').innerHTML = '<span class="err">' + e.message + '</span>'; }
+}
+
+function refreshForm() {
+  const d = $('disclose').checked, yb = $('yourBrand').checked, bc = $('branded').checked;
+  $('discloseOpts').style.display = d ? 'block' : 'none';
+  const selfOnly = [...$('privacy').options].find(o => o.value === 'SELF_ONLY');
+  if (selfOnly) { selfOnly.disabled = d && bc; selfOnly.title = d && bc ? 'Branded content visibility cannot be set to private.' : ''; if (d && bc && $('privacy').value === 'SELF_ONLY') $('privacy').value = ''; }
+  $('discloseHint').textContent = d && !yb && !bc ? 'You need to indicate if your content promotes yourself, a third party, or both.' : '';
+  const music = '<a href="https://www.tiktok.com/legal/page/global/music-usage-confirmation/en" target="_blank">Music Usage Confirmation</a>';
+  const bcp = '<a href="https://www.tiktok.com/legal/page/global/bc-policy/en" target="_blank">Branded Content Policy</a>';
+  $('consent').innerHTML = 'By posting, you agree to TikTok\'s ' + (d && bc ? bcp + ' and ' : '') + music + '.';
+  const tooLong = creator && videoDuration > creator.max_video_post_duration_sec;
+  $('dur').innerHTML = videoDuration ? `Length ${Math.round(videoDuration)}s` + (tooLong ? ' <span class="err">— longer than this account allows</span>' : '') : '';
+  const ready = $('file').files[0] && !tooLong && $('privacy').value && (!d || yb || bc);
+  $('btnPost').disabled = !ready;
+  $('btnDraft').disabled = !($('file').files[0] && !tooLong);
+}
+['privacy','disclose','yourBrand','branded','allowComment','allowDuet','allowStitch'].forEach(id => $(id).addEventListener('change', refreshForm));
+$('file').onchange = () => {
+  const f = $('file').files[0]; if (!f) return;
+  const v = $('preview'); v.src = URL.createObjectURL(f); v.style.display = 'block';
+  v.onloadedmetadata = () => { videoDuration = v.duration; refreshForm(); };
+};
+
+async function upload(direct) {
+  const f = $('file').files[0];
+  $('btnPost').disabled = $('btnDraft').disabled = true;
+  const st = $('status'); st.className = ''; st.textContent = 'Preparing upload…';
+  try {
+    const source_info = { source: 'FILE_UPLOAD', video_size: f.size, chunk_size: f.size, total_chunk_count: 1 };
+    let init;
+    if (direct) {
+      const d = $('disclose').checked;
+      init = await call('/v2/post/publish/video/init/', { source_info, post_info: {
+        title: $('title').value, privacy_level: $('privacy').value,
+        disable_comment: !$('allowComment').checked, disable_duet: !$('allowDuet').checked, disable_stitch: !$('allowStitch').checked,
+        brand_content_toggle: d && $('branded').checked, brand_organic_toggle: d && $('yourBrand').checked,
+        is_aigc: $('aigc').checked } });
+    } else {
+      init = await call('/v2/post/publish/inbox/video/init/', { source_info });
+    }
+    st.textContent = 'Uploading video…';
+    const r = await fetch(SAMGUK.api + '/api/upload', { method: 'PUT', headers: {
+      'X-Upload-Url': init.upload_url, 'Content-Type': f.type || 'video/mp4',
+      'Content-Range': `bytes 0-${f.size - 1}/${f.size}` }, body: f });
+    if (!r.ok) throw new Error('Upload failed (' + r.status + ')');
+    st.textContent = 'Processing…';
+    for (let i = 0; i < 40; i++) {
+      await new Promise(res => setTimeout(res, 3000));
+      const s = await call('/v2/post/publish/status/fetch/', { publish_id: init.publish_id });
+      if (s.status === 'PUBLISH_COMPLETE' || s.status === 'SEND_TO_USER_INBOX') {
+        st.className = 'ok';
+        st.textContent = direct ? 'Posted. It may take a few minutes for the video to process and appear on your profile.' : 'Sent to your TikTok inbox. Open TikTok to finish and post it.';
+        loadStats(); return;
+      }
+      if (s.status === 'FAILED') throw new Error(s.fail_reason || 'failed');
+      st.textContent = 'Processing… (' + s.status + ')';
+    }
+    st.textContent = 'Still processing. Check your TikTok profile in a few minutes.';
+  } catch (e) { st.className = 'err'; st.textContent = 'Error: ' + e.message; refreshForm(); }
+}
+$('btnPost').onclick = () => upload(true);
+$('btnDraft').onclick = () => upload(false);
+$('btnRefresh').onclick = loadStats;
+
+(async () => {
+  const saved = sessionStorage.getItem('tt_token');
+  if (!saved) return;
+  token = JSON.parse(saved);
+  $('login').style.display = 'none'; $('app').style.display = 'block';
+  try { await loadCreator(); } catch (e) { $('creator').innerHTML = '<span class="err">' + e.message + '</span>'; }
+  refreshForm(); loadStats();
+})();
+</script>
+<footer>© 2026 Samguk Shorts</footer></body></html>
